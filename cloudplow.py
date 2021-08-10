@@ -5,6 +5,7 @@ import sys
 import time
 from logging.handlers import RotatingFileHandler
 from multiprocessing import Process
+import subprocess
 
 import requests
 import schedule
@@ -471,7 +472,7 @@ def do_upload(remote=None):
             log.exception("Exception occurred while uploading: ")
 
     log.info("Finished upload")
-
+    do_postscript(uploader_config['post_script'])
 
 @decorators.timed
 def do_sync(use_syncer=None):
@@ -656,10 +657,16 @@ def do_plex_monitor():
         else:
             # we had a response
             stream_count = 0
+            local_stream_count = 0
             for stream in streams:
                 if (stream.state == 'playing' or stream.state == 'buffering') and not stream.local:
                     stream_count += 1
+                if (stream.state == 'playing' or stream.state == 'buffering') and stream.local:
+                    local_stream_count += 1
 
+            if not conf.configs['plex']['ignore_local_streams']:
+                stream_count += local_stream_count
+                
             # are we already throttled?
             if ((not throttled or (throttled and not rclone.throttle_active(throttle_speed))) and (
                     stream_count >= conf.configs['plex']['max_streams_before_throttle'])):
@@ -722,10 +729,28 @@ def do_plex_monitor():
     log.info("Finished monitoring Plex stream(s)!")
     plex_monitor_thread = None
 
+def do_postscript(script):
+    if os.path.isfile(script) == False:
+        log.error("Script file does not exist")
+    else:
+        log.info("Script File: %s is running", script)
+        try:
+            subprocess.call(script)
+            log.error("Script Finished")
+
+        except:
+            log.error("Please Make sure your script has a shell, and is properly formated")
 
 ############################################################
 # SCHEDULED FUNCS
 ############################################################
+
+def inotify_uploader(uploader_name,uploader_settings,count):
+    source=conf.configs['remotes'][uploader_name]['upload_folder']
+    if path.check_file_operations(source):
+        do_upload(uploader_name)
+        do_hidden()
+
 
 def scheduled_uploader(uploader_name, uploader_settings):
     log.debug("Scheduled disk check triggered for uploader: %s", uploader_name)
@@ -831,9 +856,14 @@ if __name__ == "__main__":
 
             # add uploaders to schedule
             for uploader, uploader_conf in conf.configs['uploader'].items():
-                schedule.every(uploader_conf['check_interval']).minutes.do(scheduled_uploader, uploader, uploader_conf)
-                log.info("Added %s uploader to schedule, checking available disk space every %d minutes", uploader,
-                         uploader_conf['check_interval'])
+                count=0
+                if uploader_conf['inotify']:
+                    schedule.every(1).seconds.do(inotify_uploader, uploader,uploader_conf,count)
+                    log.info ("Added %s uploader to schedule, checking for directory changes with inotify ",uploader)
+
+                else:
+                    schedule.every(uploader_conf['check_interval']).minutes.do(scheduled_uploader, uploader, uploader_conf,uploader_conf['inotify'])
+                    log.info("Added %s uploader to schedule, checking available disk space every %d minutes:inotify is %s ", uploader,uploader_conf['check_interval'],uploader_conf['Inotify'])
 
             # add syncers to schedule
             init_syncers()
